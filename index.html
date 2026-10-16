@@ -1,0 +1,381 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project Nebula</title>
+<style>
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: #101526; color: #f4f6ff;
+  font-family: system-ui, Arial, sans-serif;
+}
+main { max-width: 900px; margin: auto; padding: 20px; }
+h1 { color: #7ce7ff; margin-bottom: 4px; }
+.panel {
+  background: #1b2440; border: 1px solid #394766;
+  border-radius: 15px; padding: 16px; margin: 12px 0;
+}
+input, button {
+  padding: 11px; border-radius: 8px; border: 0;
+  margin: 4px; font-size: 15px;
+}
+input { max-width: 100%; }
+button { background: #70e1ee; color: #101526; font-weight: bold; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+.hidden { display: none !important; }
+#status { min-height: 26px; color: #ffdf87; }
+#players { display: flex; flex-wrap: wrap; gap: 8px; }
+.player {
+  background: #293452; border-radius: 10px; padding: 9px;
+  display: flex; gap: 8px; align-items: center;
+}
+.dot { width: 15px; height: 15px; border-radius: 50%; display: inline-block; }
+.dead { opacity: .4; text-decoration: line-through; }
+#map {
+  position: relative; width: 100%; max-width: 620px;
+  height: 400px; background: #19263c; overflow: hidden;
+  border: 3px solid #61749b; border-radius: 15px;
+  background-image:
+    linear-gradient(#ffffff0b 1px, transparent 1px),
+    linear-gradient(90deg, #ffffff0b 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+.avatar {
+  position: absolute; transform: translate(-50%,-50%);
+  width: 27px; height: 31px; border: 2px solid white;
+  border-radius: 12px 12px 8px 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: white; font-weight: bold;
+}
+.avatar.me { outline: 3px solid #ffe780; }
+.avatar.dead { filter: grayscale(1); }
+#votes button { display: block; margin: 8px 0; }
+.small { color: #b9c5e2; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🚀 Project Nebula</h1>
+  <div class="small">Juego social de impostores · Hasta 15 jugadores</div>
+
+  <section id="home" class="panel">
+    <h2>Entra a la nave</h2>
+    <input id="name" maxlength="16" placeholder="Tu nombre" />
+    <div>
+      <button id="create">Crear sala</button>
+    </div>
+    <div>
+      <input id="code" maxlength="6" placeholder="Código de sala" />
+      <button id="join">Unirse</button>
+    </div>
+    <p class="small">Necesitan al menos 3 jugadores para comenzar.</p>
+  </section>
+
+  <section id="lobby" class="panel hidden">
+    <h2>Sala: <span id="roomCode"></span></h2>
+    <p>Comparte este código con tus amigos.</p>
+    <p id="hostInfo"></p>
+    <div id="players"></div>
+    <button id="start">Comenzar partida</button>
+    <button id="leave">Salir de la sala</button>
+  </section>
+
+  <section id="game" class="panel hidden">
+    <h2 id="phaseTitle">Explora la nave</h2>
+    <p id="role">Tu rol aparecerá aquí.</p>
+    <div id="map" aria-label="Mapa del juego"></div>
+    <p class="small">Muévete con WASD o las flechas del teclado. En móvil, usa los botones.</p>
+    <div>
+      <button data-move="up">⬆️</button>
+      <button data-move="left">⬅️</button>
+      <button data-move="down">⬇️</button>
+      <button data-move="right">➡️</button>
+    </div>
+    <button id="kill" class="hidden">Eliminar jugador cercano</button>
+    <button id="report">🚨 Convocar reunión</button>
+    <button id="exitGame">Salir de la sala</button>
+    <div id="votes" class="panel hidden">
+      <h3>🗳️ ¿Quién es el impostor?</h3>
+      <div id="voteOptions"></div>
+      <button id="skip">Saltar votación</button>
+    </div>
+  </section>
+
+  <section id="end" class="panel hidden">
+    <h2 id="endMessage"></h2>
+    <button id="again">Volver al inicio</button>
+  </section>
+
+  <div id="status" role="status"></div>
+</main>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+const $ = id => document.getElementById(id);
+
+const colors = [
+  "#f34e60", "#4c9eff", "#4bd5a0", "#ffcc55",
+  "#c58cff", "#ff944d", "#63e4e8", "#f58dca",
+  "#b6dc62", "#d3d8e8", "#c17a58", "#8a91ff"
+];
+
+let myId = null;
+let myRole = null;
+let room = null;
+let state = null;
+let phase = "home";
+let voted = false;
+let moveTimer = null;
+
+function show(id) {
+  ["home", "lobby", "game", "end"].forEach(section =>
+    $(section).classList.toggle("hidden", section !== id)
+  );
+}
+
+function notice(message) {
+  $("status").textContent = message;
+}
+
+function playerName() {
+  return $("name").value.trim() || "Jugador";
+}
+
+function leave() {
+  socket.emit("leave-room");
+  room = null;
+  state = null;
+  myRole = null;
+  myId = null;
+  stopMove();
+  show("home");
+}
+
+$("create").onclick = () =>
+  socket.emit("create-room", playerName());
+
+$("join").onclick = () =>
+  socket.emit("join-room", {
+    code: $("code").value,
+    name: playerName()
+  });
+
+$("leave").onclick = leave;
+$("exitGame").onclick = leave;
+
+$("start").onclick = () => socket.emit("start-game");
+
+$("again").onclick = () => {
+  room = null;
+  state = null;
+  myRole = null;
+  myId = null;
+  show("home");
+};
+
+socket.on("connect", () => notice("Conectado al servidor."));
+socket.on("disconnect", () => notice("Conexión perdida. Recarga la página para reconectar."));
+
+socket.on("joined", data => {
+  room = data.code;
+  myId = data.id;
+  $("roomCode").textContent = room;
+  show("lobby");
+  notice("Entraste a la sala " + room);
+});
+
+socket.on("notice", notice);
+
+socket.on("state", data => {
+  state = data;
+  $("roomCode").textContent = data.code;
+  $("hostInfo").textContent =
+    data.hostId === myId ? "Tú eres quien organiza la sala." : "Esperando al anfitrión.";
+
+  $("players").innerHTML = "";
+  data.players.forEach(p => {
+    const item = document.createElement("div");
+    item.className = "player" + (p.alive ? "" : " dead");
+
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    dot.style.background = colors[p.color % colors.length];
+
+    const name = document.createElement("span");
+    name.textContent = p.name + (p.id === myId ? " (tú)" : "");
+
+    item.append(dot, name);
+    $("players").appendChild(item);
+  });
+
+  $("start").classList.toggle("hidden", data.hostId !== myId);
+  $("start").disabled = data.players.length < 3 || data.phase !== "lobby";
+
+  if (data.phase === "lobby") {
+    show("lobby");
+  } else if (data.phase === "playing" || data.phase === "meeting") {
+    show("game");
+    renderMap();
+    $("phaseTitle").textContent =
+      data.phase === "meeting" ? "Reunión de emergencia" : "Explora la nave";
+    $("votes").classList.toggle("hidden", data.phase !== "meeting");
+    $("kill").classList.toggle("hidden",
+      data.phase !== "playing" || myRole !== "impostor");
+    $("report").classList.toggle("hidden", data.phase !== "playing");
+    if (data.phase !== "meeting") voted = false;
+  } else if (data.phase === "ended") {
+    show("game");
+  }
+});
+
+socket.on("your-role", role => {
+  myRole = role;
+  $("role").textContent = role === "impostor"
+    ? "🔪 Eres el IMPOSTOR. Acércate a otro jugador para eliminarlo."
+    : "🧑‍🚀 Eres TRIPULANTE. Observa a los demás y descubre al impostor.";
+});
+
+socket.on("meeting-start", () => {
+  voted = false;
+  notice("¡Reunión! Elige a quién votar.");
+});
+
+socket.on("meeting-result", message => notice(message));
+
+socket.on("game-over", message => {
+  $("endMessage").textContent = message;
+  show("end");
+});
+
+function renderMap() {
+  if (!state) return;
+  const map = $("map");
+  map.innerHTML = "";
+
+  state.players.forEach(p => {
+    const avatar = document.createElement("div");
+    avatar.className = "avatar" +
+      (p.id === myId ? " me" : "") +
+      (p.alive ? "" : " dead");
+
+    avatar.style.left = (p.x / 600 * 100) + "%";
+    avatar.style.top = (p.y / 400 * 100) + "%";
+    avatar.style.background = colors[p.color % colors.length];
+    avatar.textContent = p.name.slice(0, 2).toUpperCase();
+    avatar.title = p.name;
+    map.appendChild(avatar);
+  });
+
+  renderVotes();
+}
+
+function renderVotes() {
+  if (!state || state.phase !== "meeting") return;
+  const container = $("voteOptions");
+  container.innerHTML = "";
+
+  state.players.filter(p => p.alive && p.id !== myId).forEach(p => {
+    const button = document.createElement("button");
+    button.textContent = "Votar por " + p.name;
+    button.disabled = voted;
+    button.onclick = () => castVote(p.id);
+    container.appendChild(button);
+  });
+
+  $("skip").disabled = voted;
+}
+
+function castVote(target) {
+  if (voted) return;
+  voted = true;
+  socket.emit("vote", target);
+  renderVotes();
+  notice("Voto enviado.");
+}
+
+$("skip").onclick = () => castVote("skip");
+$("report").onclick = () => socket.emit("report");
+
+$("kill").onclick = () => {
+  if (!state) return;
+
+  const me = state.players.find(p => p.id === myId);
+  if (!me) return;
+
+  const target = state.players
+    .filter(p => p.alive && p.id !== myId)
+    .map(p => ({
+      p,
+      distance: Math.hypot(p.x - me.x, p.y - me.y)
+    }))
+    .filter(item => item.distance <= 45)
+    .sort((a, b) => a.distance - b.distance)[0];
+
+  if (!target) return notice("Acércate a un jugador.");
+  socket.emit("kill", target.p.id);
+};
+
+function move(dx, dy) {
+  if (!state || state.phase !== "playing") return;
+
+  const me = state.players.find(p => p.id === myId);
+  if (!me || !me.alive) return;
+
+  socket.emit("move", {
+    x: me.x + dx,
+    y: me.y + dy
+  });
+}
+
+function startMove(direction) {
+  stopMove();
+  const directions = {
+    up: [0, -10],
+    down: [0, 10],
+    left: [-10, 0],
+    right: [10, 0]
+  };
+  const delta = directions[direction];
+  if (!delta) return;
+  move(...delta);
+  moveTimer = setInterval(() => move(...delta), 130);
+}
+
+function stopMove() {
+  if (moveTimer) clearInterval(moveTimer);
+  moveTimer = null;
+}
+
+document.querySelectorAll("[data-move]").forEach(button => {
+  button.addEventListener("pointerdown", event => {
+    event.preventDefault();
+    startMove(button.dataset.move);
+  });
+  button.addEventListener("pointerup", stopMove);
+  button.addEventListener("pointerleave", stopMove);
+  button.addEventListener("pointercancel", stopMove);
+});
+
+const keys = {
+  ArrowUp: "up", w: "up", W: "up",
+  ArrowDown: "down", s: "down", S: "down",
+  ArrowLeft: "left", a: "left", A: "left",
+  ArrowRight: "right", d: "right", D: "right"
+};
+
+document.addEventListener("keydown", event => {
+  if (keys[event.key] && !event.repeat) {
+    event.preventDefault();
+    startMove(keys[event.key]);
+  }
+});
+
+document.addEventListener("keyup", event => {
+  if (keys[event.key]) stopMove();
+});
+</script>
+</body>
+</html>
